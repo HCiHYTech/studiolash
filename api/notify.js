@@ -1,42 +1,46 @@
-// Vercel serverless function — sends a booking SMS notification to Kelsey via Twilio.
-// Uses the HCiHY Twilio subaccount (created 2026-07-05), same one wired for
-// Leilani's Classy Cleaning (see leilanis-classy-cleaning/api/notify-sms.js).
+// Vercel serverless function — sends a booking notification to Kelsey via Resend email.
+//
+// 2026-09-02: repointed from Twilio SMS back to Resend email. The Twilio path
+// (commit 182d1ab) has been sitting dead since 2026-07-19 — TWILIO_ACCOUNT_SID /
+// TWILIO_AUTH_TOKEN / TWILIO_FROM_NUMBER were never set on this Vercel project
+// (Linear AIF-63), and even once set, delivery is separately gated on the HCiHY
+// subaccount's toll-free number clearing Twilio Trust Hub verification — no ETA
+// on either. Email has no such gate: it uses the same Resend pattern this repo
+// already ran successfully June 19–July 19 2026 (see commit 65bb9d8), just via a
+// raw fetch instead of the `resend` npm package so no package.json/build step is
+// needed here, matching the rest of this repo's no-dependency style.
+//
+// Sends to Kelsey directly (not Dan) — confirmed her real inbox 2026-09-02.
 
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+// hcihytech.com is the domain verified in Resend (2026-09-02) — hcihysvc.com
+// was the old default and was never confirmed verified. Recipients see the
+// "Kelsey Renee Beauty Booking" display name, not this raw address, so which
+// verified domain it rides on doesn't matter cosmetically.
+const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || 'bookings@hcihytech.com';
 
-// Kelsey's own phone. This is the same number as the public site's tel:/sms:
-// links — Kelsey's personal number and the business number are one and the
-// same. Confirmed by Dan 2026-07-19.
-const KELSEY_PHONE = '+16614366728';
+// Kelsey's own inbox. Confirmed current/accurate via the SL-001 client record
+// (2026-07-18 correction) and reconfirmed 2026-09-02.
+const KELSEY_EMAIL = process.env.KELSEY_NOTIFY_EMAIL || 'kelsey.bell66@yahoo.com';
 
-function toE164(phone) {
-  const digits = String(phone || '').replace(/\D/g, '');
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
-  return null;
-}
-
-async function sendSms(to, body) {
-  const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
-  const params = new URLSearchParams({ To: to, From: TWILIO_FROM_NUMBER, Body: body });
-
-  const res = await fetch(
-    `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
-    {
-      method: 'POST',
-      headers: {
-        Authorization: `Basic ${auth}`,
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: params,
-    }
-  );
+async function sendEmail({ to, subject, html }) {
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      from: `Kelsey Renee Beauty Booking <${RESEND_FROM_EMAIL}>`,
+      to: [to],
+      subject,
+      html,
+    }),
+  });
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Twilio ${res.status}: ${text}`);
+    throw new Error(`Resend ${res.status}: ${text}`);
   }
 }
 
@@ -53,20 +57,32 @@ module.exports = async (req, res) => {
     return;
   }
 
-  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) {
-    console.error('Twilio env vars not configured — cannot send booking SMS');
-    res.status(500).json({ ok: false, error: 'SMS notification is not configured yet' });
+  if (!RESEND_API_KEY) {
+    console.error('RESEND_API_KEY not configured — cannot send booking email');
+    res.status(500).json({ ok: false, error: 'Email notification is not configured yet' });
     return;
   }
 
-  const clientPhone = toE164(phone) || phone;
-  const body = `New booking request — ${name}, ${service || 'service TBD'}, ${day} @ ${time}. Phone: ${clientPhone}${notes ? `. Notes: ${notes}` : ''}`;
+  const bodyLines = [
+    `New booking request — Kelsey Renee Beauty`,
+    ``,
+    `Name: ${name}`,
+    `Phone: ${phone}`,
+    `Service: ${service || 'n/a'}`,
+    `Requested day: ${day}`,
+    `Requested time: ${time}`,
+    `Notes: ${notes || 'n/a'}`,
+  ];
 
   try {
-    await sendSms(KELSEY_PHONE, body);
+    await sendEmail({
+      to: KELSEY_EMAIL,
+      subject: `New booking request — ${name} (${day} @ ${time})`,
+      html: bodyLines.map((line) => `<p>${line}</p>`).join(''),
+    });
     res.status(200).json({ ok: true });
   } catch (err) {
-    console.error('Kelsey SMS failed:', err.message);
-    res.status(502).json({ ok: false, error: 'Failed to send SMS notification' });
+    console.error('Kelsey booking email failed:', err.message);
+    res.status(502).json({ ok: false, error: 'Failed to send email notification' });
   }
 };
